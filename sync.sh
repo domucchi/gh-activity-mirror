@@ -4,20 +4,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-WORK_USER="dominik-applifting"
-PERSONAL_USER="domucchi"
-MIRROR_REPO="domucchi/activity-mirror"
-MIRROR_DIR="${SCRIPT_DIR}/.mirror"
-STATE_FILE="${SCRIPT_DIR}/state.json"
 CONFIG_FILE="${SCRIPT_DIR}/config.env"
+EXAMPLE_FILE="${SCRIPT_DIR}/config.env.example"
+STATE_FILE="${SCRIPT_DIR}/state.json"
+MIRROR_DIR="${SCRIPT_DIR}/.mirror"
 
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     -h|--help)
-      echo "Usage: $0 [--dry-run]"
-      echo "  --dry-run  fetch counts and report what would happen, but don't commit or push"
+      cat <<EOF
+Usage: $0 [--dry-run]
+
+  --dry-run  Fetch contribution counts and report what would happen,
+             but don't create commits or push.
+  -h, --help Show this help.
+
+Configuration is loaded from: $CONFIG_FILE
+If it doesn't exist, run ./setup.sh or copy config.env.example and edit.
+EOF
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -25,25 +31,52 @@ for arg in "$@"; do
 done
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "ERROR: $CONFIG_FILE not found. Edit the placeholder values first." >&2
+  echo "ERROR: $CONFIG_FILE not found." >&2
+  if [[ -f "$EXAMPLE_FILE" ]]; then
+    echo "       Run ./setup.sh  (interactive)" >&2
+    echo "       or: cp config.env.example config.env  and edit it." >&2
+  fi
   exit 1
 fi
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
-: "${PERSONAL_EMAIL:?PERSONAL_EMAIL must be set in config.env}"
+
+# Required config — fail fast with a pointer at the config file.
+: "${WORK_USER:?WORK_USER must be set in config.env (GitHub username whose activity is mirrored)}"
+: "${PERSONAL_USER:?PERSONAL_USER must be set in config.env (GitHub username that owns the mirror repo)}"
+: "${MIRROR_REPO:?MIRROR_REPO must be set in config.env (e.g. $PERSONAL_USER/activity-mirror)}"
+: "${PERSONAL_EMAIL:?PERSONAL_EMAIL must be set in config.env (must be verified on $PERSONAL_USER)}"
 : "${PERSONAL_NAME:?PERSONAL_NAME must be set in config.env}"
+
+# Trim trailing whitespace that tends to sneak into .env files and silently
+# break git commit authorship (email mismatch → commit doesn't count).
+WORK_USER="${WORK_USER%"${WORK_USER##*[![:space:]]}"}"
+PERSONAL_USER="${PERSONAL_USER%"${PERSONAL_USER##*[![:space:]]}"}"
+MIRROR_REPO="${MIRROR_REPO%"${MIRROR_REPO##*[![:space:]]}"}"
+PERSONAL_EMAIL="${PERSONAL_EMAIL%"${PERSONAL_EMAIL##*[![:space:]]}"}"
+PERSONAL_NAME="${PERSONAL_NAME%"${PERSONAL_NAME##*[![:space:]]}"}"
 
 for cmd in gh jq git; do
   command -v "$cmd" >/dev/null || { echo "ERROR: $cmd is not installed" >&2; exit 1; }
 done
 
-# On exit, ensure we're switched back to personal so we don't leave the shell on the work account
+# Confirm both accounts are authenticated with gh before we start switching.
+for u in "$WORK_USER" "$PERSONAL_USER"; do
+  if ! gh auth status 2>&1 | grep -q "account $u "; then
+    echo "ERROR: gh is not authenticated as '$u'." >&2
+    echo "       Run: gh auth login  (and add both $WORK_USER and $PERSONAL_USER)" >&2
+    exit 1
+  fi
+done
+
+# On exit, switch back to personal so the shell doesn't stay on the work account.
 trap 'gh auth switch --user "$PERSONAL_USER" >/dev/null 2>&1 || true' EXIT
 
 if [[ -f "$STATE_FILE" ]] && [[ -n "$(jq -r '.last_synced_date // empty' "$STATE_FILE")" ]]; then
   FROM=$(jq -r '.last_synced_date' "$STATE_FILE")
 else
-  FROM=$(date -u -v-1y +%Y-%m-%d)
+  # GNU date vs BSD date: try both.
+  FROM=$(date -u -v-1y +%Y-%m-%d 2>/dev/null || date -u -d '1 year ago' +%Y-%m-%d)
 fi
 TO=$(date -u +%Y-%m-%d)
 
@@ -104,7 +137,7 @@ cd "$MIRROR_DIR"
 git config user.email "$PERSONAL_EMAIL"
 git config user.name "$PERSONAL_NAME"
 
-# If repo is freshly created and empty, seed an initial commit so we have a branch to push
+# If repo is freshly created and empty, seed an initial commit so we have a branch to push.
 if ! git rev-parse HEAD >/dev/null 2>&1; then
   git checkout -B main
   GIT_AUTHOR_NAME="$PERSONAL_NAME" GIT_AUTHOR_EMAIL="$PERSONAL_EMAIL" \
@@ -120,7 +153,7 @@ while IFS= read -r line; do
   date=$(awk '{print $1}' <<< "$line")
   count=$(awk '{print $2}' <<< "$line")
   for i in $(seq 1 "$count"); do
-    # Spread commits through the day starting at noon, in 1s increments,
+    # Spread commits through the day starting at noon UTC, in 1s increments,
     # rolling over into minutes/hours for days with lots of activity.
     off=$((i - 1))
     h=$(( 12 + off / 3600 ))

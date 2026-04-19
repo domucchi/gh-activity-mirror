@@ -1,3 +1,8 @@
+# Local config with real usernames/emails — never commit.
 config.env
+
+# Runtime state (tracks the last sync date).
 state.json
+
+# Clone of the mirror repo, created on first non-dry-run.
 .mirror/

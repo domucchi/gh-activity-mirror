@@ -1,30 +1,41 @@
 # gh-activity-mirror
 
-Mirrors daily GitHub contribution *counts* from the work account (`dominik-applifting`) to a private repo on the personal account (`domucchi`) so the personal contribution graph reflects real activity. Only counts are read — never repo names, branches, commit messages, or diffs.
+Mirror daily GitHub contribution **counts** from one account (e.g. a work
+account with private repos you can't show) to a private repo on another
+account, so the target account's contribution graph reflects your real
+activity.
 
-## One-time setup
+Only aggregate counts are read — never repo names, branch names, commit
+messages, or diffs. The mirror repo contains only empty commits with the
+message `"mirror activity"`.
 
-1. **Create the private mirror repo on the personal account.**
-   ```sh
-   gh auth switch --user domucchi
-   gh repo create activity-mirror --private --clone=false
-   ```
+## Requirements
 
-2. **Enable private contributions on the graph.**
-   Visit https://github.com/settings/profile and turn on *"Include private contributions on my profile"*.
+- `gh` (GitHub CLI), `git`, `jq`, `bash`
+- Both the source account and the target account signed into `gh`
+  (`gh auth login`, once per account)
 
-3. **Fill in `config.env`.**
-   - `PERSONAL_EMAIL` must be verified on the `domucchi` account. The noreply address is recommended — get it with:
-     ```sh
-     gh auth switch --user domucchi
-     gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"'
-     ```
-   - `PERSONAL_NAME` is already set.
+## Setup
 
-4. **Make the script executable.**
-   ```sh
-   chmod +x sync.sh
-   ```
+```sh
+./setup.sh
+```
+
+The script will:
+
+1. Ask for the source and target GitHub usernames.
+2. Verify both are authenticated with `gh`.
+3. Create the private mirror repo on the target account (if it doesn't exist).
+4. Fetch the target account's GitHub noreply email.
+5. Write `config.env` with everything filled in.
+
+Prefer to do it by hand? Copy `config.env.example` to `config.env` and edit
+the values.
+
+**One manual step setup can't do for you**: on the target account, turn on
+*"Include private contributions on my profile"* at
+<https://github.com/settings/profile>. Without it, commits in a private
+repo won't show up on the graph.
 
 ## Usage
 
@@ -33,24 +44,56 @@ Mirrors daily GitHub contribution *counts* from the work account (`dominik-appli
 ./sync.sh             # actually create backdated empty commits and push
 ```
 
-First run backfills one year. Subsequent runs are incremental via `state.json`.
+First run backfills up to one year. Subsequent runs are incremental via
+`state.json`.
 
 ## How it works
 
-1. `gh auth switch --user dominik-applifting`
-2. GraphQL query for `contributionsCollection` over the sync window → `{date, count}` per day.
-3. `gh auth switch --user domucchi`
-4. For each day with `count > 0`: create N empty commits with `GIT_AUTHOR_DATE` set to that day (staggered seconds starting at noon UTC).
-5. Push to `domucchi/activity-mirror`.
+1. `gh auth switch` to the source account.
+2. GraphQL query for `contributionsCollection` over the sync window
+   → `{date, count}` per day.
+3. `gh auth switch` to the target account.
+4. For each day with `count > 0`: create N empty commits with
+   `GIT_AUTHOR_DATE` set to that day (staggered seconds from noon UTC).
+5. Push to the mirror repo.
 6. Update `state.json` with the new upper bound.
 
 ## Scheduling (optional)
 
-To run weekly via launchd, drop a plist at `~/Library/LaunchAgents/com.domucchi.gh-activity-mirror.plist` pointing at `sync.sh`. Easiest alternative: a cron entry like `0 8 * * 1  /Users/domucchi/Code/scripts/gh-activity-mirror/sync.sh >> /tmp/gh-mirror.log 2>&1`.
+Weekly via cron:
+
+```cron
+0 8 * * 1  /absolute/path/to/gh-activity-mirror/sync.sh >> /tmp/gh-mirror.log 2>&1
+```
+
+Or a `launchd` plist on macOS pointing at `sync.sh`.
+
+## Files
+
+| File                  | Purpose                                        | Tracked? |
+| --------------------- | ---------------------------------------------- | -------- |
+| `sync.sh`             | The mirror logic                               | yes      |
+| `setup.sh`            | Interactive config generator                   | yes      |
+| `config.env.example`  | Documented config template                     | yes      |
+| `config.env`          | Your local config (usernames, email)           | no       |
+| `state.json`          | Tracks the last synced date                    | no       |
+| `.mirror/`            | Local clone of the mirror repo                 | no       |
 
 ## Caveats
 
-- Only works because you're authenticated as the work user — the GraphQL `contributionsCollection` returns **private** contributions only to the viewer who owns them.
-- "Include private contributions on my profile" must stay on, or private-repo commits won't show on the graph.
-- If work policy restricts secondary use of activity data, think before running. The script only reads aggregate counts already visible to you, but the pattern can look odd in a compliance review — your call.
-- Mirrored commits all have the message `"mirror activity"` and an empty tree. `git log` in the mirror repo makes the mechanism obvious to anyone who looks.
+- The source account's private contributions are only returned by the
+  GraphQL API to the viewer who owns them — that's why the script
+  auth-switches to the source account to read counts.
+- "Include private contributions on my profile" must stay on, or commits
+  in the private mirror repo won't show on the target's graph.
+- If the source account's policy restricts secondary use of activity data,
+  think before running. The script only reads aggregate counts that are
+  already visible to you, but the pattern can look odd in a compliance
+  review — your call.
+- Mirrored commits all have the message `"mirror activity"` and an empty
+  tree. `git log` in the mirror repo makes the mechanism obvious to anyone
+  who looks.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Do whatever you want with it.
